@@ -10,6 +10,8 @@ HEADERS = {
     "x-api-key": os.getenv("AM_API_KEY")
 }
 
+BANNER_URL = "https://raw.githubusercontent.com/vannn626-afk/leovan.prem/main/banner.jpg"
+
 TXT_WELCOME = (
     "🎬 *GET AM PREMIUM*\n"
     "━━━━━━━━━━━━━━━━━━\n"
@@ -19,6 +21,45 @@ TXT_WELCOME = (
     "✨ Unlimited Export\n"
     "✨ Premium Effects & Fonts\n\n"
     "Tekan tombol di bawah 👇"
+)
+
+TXT_STEP1 = (
+    "📧 *STEP 1 — MASUKKAN EMAIL*\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "Kirim email Alight Motion kamu.\n"
+    "Contoh:\n`user@gmail.com`"
+)
+
+TXT_STEP2 = (
+    "📬 *STEP 2 — CEK EMAIL*\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "Magic link sudah dikirim ke:\n"
+    "`{email}`\n\n"
+    "Buka email → copy link → paste di sini 👇"
+)
+
+TXT_STEP3 = (
+    "🚀 *STEP 3 — GASS TERAPIN PREMIUM*\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "Email: `{email}`\n"
+    "Status: ✅ OK\n\n"
+    "Tekan *GASS PREMIUM* 👇"
+)
+
+TXT_SUCCESS = (
+    "🎉 *PREMIUM AKTIF!*\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "Email: `{email}`\n"
+    "Paket: *1 Tahun AM Premium*\n"
+    "Status: ✅ BERHASIL\n\n"
+    "Selamat berkarya 🗿🤗"
+)
+
+TXT_FAIL = (
+    "❌ *GAGAL*\n"
+    "Email: `{email}`\n"
+    "Alasan: `{reason}`\n\n"
+    "Ulang /start"
 )
 
 def kb_main():
@@ -32,17 +73,27 @@ def kb_step3():
     ])
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(TXT_WELCOME, parse_mode="Markdown", reply_markup=kb_main())
+    await update.message.reply_photo(
+        photo=BANNER_URL,
+        caption=TXT_WELCOME,
+        parse_mode="Markdown",
+        reply_markup=kb_main()
+    )
 
 async def cb_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     context.user_data.clear()
     context.user_data["step"] = "email"
-    await q.edit_message_text(
-        "📧 *STEP 1*\nKirim email Alight Motion kamu:\nContoh: `user@gmail.com`",
-        parse_mode="Markdown"
-    )
+    try:
+        await q.message.reply_photo(
+            photo=BANNER_URL,
+            caption=TXT_STEP1,
+            parse_mode="Markdown"
+        )
+        await q.message.delete()
+    except Exception:
+        await q.edit_message_text(TXT_STEP1, parse_mode="Markdown")
 
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get("step")
@@ -58,8 +109,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             async with aiohttp.ClientSession() as s:
                 async with s.post(f"{BASE}/send-magiclink", json={"email": email}, headers=HEADERS) as r:
                     await r.json()
-            await msg.edit_text(
-                f"📬 *STEP 2*\nMagic link dikirim ke:\n`{email}`\n\nBuka email → copy link → paste di sini 👇",
+            await msg.delete()
+            await update.message.reply_photo(
+                photo=BANNER_URL,
+                caption=TXT_STEP2.format(email=email),
                 parse_mode="Markdown"
             )
         except Exception as e:
@@ -82,9 +135,12 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data.clear()
                 return
             context.user_data["id_token"] = token
-            await msg.edit_text(
-                f"🚀 *STEP 3*\nEmail: `{email}`\nStatus: ✅ OK\n\nTekan tombol 👇",
-                parse_mode="Markdown", reply_markup=kb_step3()
+            await msg.delete()
+            await update.message.reply_photo(
+                photo=BANNER_URL,
+                caption=TXT_STEP3.format(email=email),
+                parse_mode="Markdown",
+                reply_markup=kb_step3()
             )
         except Exception as e:
             await msg.edit_text(f"❌ Error: `{e}`", parse_mode="Markdown")
@@ -105,13 +161,18 @@ async def cb_apply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             async with s.post(f"{BASE}/apply-premium", json={"email": email, "idToken": token}, headers=HEADERS) as r:
                 res = await r.json()
         if res.get("success") or res.get("status") == "ok":
-            await q.edit_message_text(
-                f"🎉 *PREMIUM AKTIF!*\nEmail: `{email}`\nPaket: 1 Tahun\nStatus: ✅ BERHASIL\n\nSelamat 🗿🤗",
+            await q.message.reply_photo(
+                photo=BANNER_URL,
+                caption=TXT_SUCCESS.format(email=email),
                 parse_mode="Markdown"
             )
         else:
             reason = res.get("message") or res.get("error") or str(res)
-            await q.edit_message_text(f"❌ Gagal: `{reason}`\n\nUlang /start", parse_mode="Markdown")
+            await q.message.reply_photo(
+                photo=BANNER_URL,
+                caption=TXT_FAIL.format(email=email, reason=reason),
+                parse_mode="Markdown"
+            )
     except Exception as e:
         await q.edit_message_text(f"❌ Error: `{e}`", parse_mode="Markdown")
     context.user_data.clear()
@@ -132,7 +193,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_start, pattern="^am_start$"))
     app.add_handler(CallbackQueryHandler(cb_apply, pattern="^am_apply$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, router))
-    print("Bot jalan...")
+    print("✅ Bot jalan!")
     app.run_polling()
 
 if __name__ == "__main__":
