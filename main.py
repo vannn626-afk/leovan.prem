@@ -3,7 +3,7 @@ from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
-TOKEN = os.getenv("8612797833:AAGmUmsgsouUGdba0WrlFGPZZoVT5E9ewsM")
+TOKEN = os.getenv("BOT_TOKEN")
 BASE = "https://am.rafaelxd.my.id/api/v1"
 HEADERS = {
     "Content-Type": "application/json",
