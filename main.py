@@ -155,7 +155,7 @@ async def cb_apply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not email or not token:
         await q.edit_message_text("❌ Sesi hilang. /start")
         return
-    await q.edit_message_text("⏳ Menerapkan premium 1 tahun...")
+    await q.message.reply_text("⏳ Menerapkan premium 1 tahun...")
     try:
         async with aiohttp.ClientSession() as s:
             async with s.post(f"{BASE}/apply-premium", json={"email": email, "idToken": token}, headers=HEADERS) as r:
