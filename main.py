@@ -1,4 +1,4 @@
-import os, re, json, aiohttp, threading, asyncio
+import os, re, json, aiohttp, threading, asyncio, random
 from datetime import datetime, date, timedelta
 from flask import Flask
 from telegram import (
@@ -19,23 +19,26 @@ ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 BANNER_URL = "https://raw.githubusercontent.com/vannn626-afk/leovan.prem/main/banner.jpg"
 QRIS_URL = "https://raw.githubusercontent.com/vannn626-afk/leovan.prem/main/qris.jpg"
 NOMOR_DANA = os.getenv("NOMOR_DANA", "08xxxxxxxxxx")
+FORCE_JOIN_CHANNEL = os.getenv("FORCE_JOIN_CHANNEL", "")
+TESTIMONI_CHANNEL = os.getenv("TESTIMONI_CHANNEL", "")
 LOG_FILE = "log.json"
+VOUCHER_FILE = "vouchers.json"
 LIMIT_PER_DAY = 3
-HARGA_PREMIUM = "Rp 10.000"
+HARGA_PREMIUM = 10000
 
 
 # ============== STORAGE ==============
 def load_log():
     if not os.path.exists(LOG_FILE):
-        return {"users": {}, "daily": {}, "logs": [], "premium": {}, "pending": {}}
+        return {"users": {}, "daily": {}, "logs": [], "premium": {}, "pending": {}, "riwayat": {}}
     try:
         with open(LOG_FILE, "r") as f:
             data = json.load(f)
-            if "premium" not in data: data["premium"] = {}
-            if "pending" not in data: data["pending"] = {}
+            for k in ["premium", "pending", "riwayat"]:
+                if k not in data: data[k] = {}
             return data
     except:
-        return {"users": {}, "daily": {}, "logs": [], "premium": {}, "pending": {}}
+        return {"users": {}, "daily": {}, "logs": [], "premium": {}, "pending": {}, "riwayat": {}}
 
 
 def save_log(data):
@@ -68,6 +71,92 @@ def register_user(user_id, username):
     return False
 
 
+def add_riwayat(user_id, email):
+    data = load_log()
+    uid = str(user_id)
+    if uid not in data["riwayat"]:
+        data["riwayat"][uid] = []
+    data["riwayat"][uid].append({
+        "email": email,
+        "time": datetime.now().isoformat()
+    })
+    data["riwayat"][uid] = data["riwayat"][uid][-20:]
+    save_log(data)
+
+
+# ============== VOUCHER ==============
+def load_vouchers():
+    if not os.path.exists(VOUCHER_FILE):
+        return {}
+    try:
+        with open(VOUCHER_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {}
+
+
+def save_vouchers(data):
+    with open(VOUCHER_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def buat_voucher(kode, diskon, max_use):
+    data = load_vouchers()
+    kode = kode.upper().strip()
+    if kode in data:
+        return False, "Kode udah ada"
+    data[kode] = {
+        "diskon": int(diskon),
+        "max_use": int(max_use),
+        "used": 0,
+        "created": datetime.now().isoformat(),
+        "aktif": True
+    }
+    save_vouchers(data)
+    return True, f"✅ Kode `{kode}` dibuat (diskon {diskon}%, max {max_use}x)"
+
+
+def cek_voucher(kode):
+    data = load_vouchers()
+    kode = kode.upper().strip()
+    if kode not in data:
+        return False, 0, "❌ Kode gak ditemukan"
+    v = data[kode]
+    if not v.get("aktif", True):
+        return False, 0, "❌ Kode udah dinonaktifkan"
+    if v["used"] >= v["max_use"]:
+        return False, 0, "❌ Kode udah habis"
+    return True, v["diskon"], f"✅ Kode valid! Diskon {v['diskon']}%"
+
+
+def pakai_voucher(kode):
+    data = load_vouchers()
+    kode = kode.upper().strip()
+    if kode in data:
+        data[kode]["used"] += 1
+        save_vouchers(data)
+
+
+def list_voucher():
+    data = load_vouchers()
+    if not data:
+        return "Belum ada voucher."
+    txt = "🎫 *DAFTAR VOUCHER*\n━━━━━━━━━━━━━━━━━━\n"
+    for kode, v in data.items():
+        status = "✅" if v.get("aktif") and v["used"] < v["max_use"] else "❌"
+        txt += f"{status} `{kode}` — {v['diskon']}% ({v['used']}/{v['max_use']})\n"
+    return txt
+
+
+def hapus_voucher(kode):
+    data = load_vouchers()
+    kode = kode.upper().strip()
+    if kode in data:
+        del data[kode]
+        save_vouchers(data)
+        return True
+    return False
+
 # ============== PREMIUM ==============
 def is_premium_user(user_id):
     data = load_log()
@@ -84,7 +173,8 @@ def set_premium_user(user_id, days=30):
     uid = str(user_id)
     data["premium"][uid] = {
         "expired": (datetime.now() + timedelta(days=days)).isoformat(),
-        "since": datetime.now().isoformat()
+        "since": datetime.now().isoformat(),
+        "days": days
     }
     save_log(data)
 
@@ -109,6 +199,7 @@ def get_premium_info(user_id):
 
 # ============== LIMIT ==============
 def get_limit(user_id):
+    if is_admin(user_id): return 999
     if is_premium_user(user_id): return 999
     data = load_log()
     uid = str(user_id)
@@ -120,6 +211,7 @@ def get_limit(user_id):
 
 
 def use_limit(user_id):
+    if is_admin(user_id): return
     if is_premium_user(user_id): return
     data = load_log()
     uid = str(user_id)
@@ -130,6 +222,18 @@ def use_limit(user_id):
     daily["used"] = daily.get("used", 0) + 1
     data["daily"][uid] = daily
     save_log(data)
+
+
+def tambah_limit_bonus(user_id, jumlah=1):
+    """Kurangi pemakaian limit (bonus dari mini games)"""
+    data = load_log()
+    uid = str(user_id)
+    today = str(date.today())
+    daily = data["daily"].get(uid, {})
+    if daily.get("date") == today:
+        daily["used"] = max(0, daily.get("used", 0) - jumlah)
+        data["daily"][uid] = daily
+        save_log(data)
 
 
 def reset_limit(user_id):
@@ -147,30 +251,56 @@ def get_reset_countdown():
     return f"{jam} jam {menit} menit"
 
 
-def is_admin(user_id): return user_id == ADMIN_ID
+def is_admin(user_id):
+    return user_id == ADMIN_ID
 
 
-# ============== TEKS ==============
+# ============== FORCE JOIN ==============
+async def cek_join_channel(bot, user_id):
+    """Return True kalo user udah join channel"""
+    if not FORCE_JOIN_CHANNEL:
+        return True
+    try:
+        member = await bot.get_chat_member(chat_id=f"@{FORCE_JOIN_CHANNEL}", user_id=user_id)
+        return member.status in ["member", "administrator", "creator"]
+    except Exception:
+        return False
+
+    # ============== TEKS ==============
 TXT_WELCOME = (
     "🎬 *GET AM PREMIUM*\n"
     "━━━━━━━━━━━━━━━━━━\n"
     "Aktifkan Alight Motion Premium\n"
     "gratis, cepat, 2 langkah.\n\n"
-    "✨ No Watermark\n✨ Unlimited Export\n✨ Premium Effects & Fonts\n\n"
+    "✨ No Watermark\n"
+    "✨ Unlimited Export\n"
+    "✨ Premium Effects & Fonts\n\n"
     "Tekan tombol di bawah 👇"
+)
+
+TXT_FORCE_JOIN = (
+    "⚠️ *WAJIB JOIN CHANNEL*\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "Buat pake bot ini, kamu wajib\n"
+    "join channel kami dulu.\n\n"
+    "Klik tombol di bawah, terus\n"
+    "klik *✅ Udah Join* ya 👇"
 )
 
 TXT_STEP1 = (
     "📧 *STEP 1 — MASUKKAN EMAIL*\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "Kirim email Alight Motion kamu.\nContoh:\n`user@gmail.com`\n\n"
-    "📊 Status limit:\n{status_limit}"
+    "Kirim email Alight Motion kamu.\n"
+    "Contoh:\n`user@gmail.com`\n\n"
+    "📊 Status limit:\n"
+    "{status_limit}"
 )
 
 TXT_STEP2 = (
     "📬 *STEP 2 — CEK EMAIL*\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "Magic link dikirim ke:\n`{email}`\n\n"
+    "Magic link dikirim ke:\n"
+    "`{email}`\n\n"
     "Buka email → copy link → paste di sini 👇"
 )
 
@@ -179,19 +309,28 @@ TXT_PROSES = "⏳ Verifikasi & aktivasi premium..."
 TXT_SUCCESS = (
     "🎉 *PREMIUM AKTIF!*\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "Email: `{email}`\nPaket: *1 Tahun AM Premium*\nStatus: ✅ BERHASIL\n\n"
-    "{status_limit}\n\nSelamat berkarya 🗿🤗"
+    "Email: `{email}`\n"
+    "Paket: *1 Tahun AM Premium*\n"
+    "Status: ✅ BERHASIL\n\n"
+    "{status_limit}\n\n"
+    "Selamat berkarya 🗿🤗"
 )
 
 TXT_SUCCESS_PREMIUM_USER = (
     "🎉 *PREMIUM AKTIF!*\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "Email: `{email}`\nPaket: *1 Tahun AM Premium*\nStatus: ✅ BERHASIL\n\n"
-    "👑 Kamu user *PREMIUM*\nUnlimited tanpa limit!\n\nSelamat berkarya 🗿🤗"
+    "Email: `{email}`\n"
+    "Paket: *1 Tahun AM Premium*\n"
+    "Status: ✅ BERHASIL\n\n"
+    "👑 Kamu user *PREMIUM*\n"
+    "Unlimited tanpa limit!\n\n"
+    "Selamat berkarya 🗿🤗"
 )
 
 TXT_FAIL = (
-    "❌ *GAGAL*\nEmail: `{email}`\nAlasan: `{reason}`\n\n"
+    "❌ *GAGAL*\n"
+    "Email: `{email}`\n"
+    "Alasan: `{reason}`\n\n"
     "Limit gak kepotong, ulang /start"
 )
 
@@ -206,26 +345,41 @@ TXT_LIMIT_HABIS = (
 TXT_HELP = (
     "📖 *PANDUAN BOT*\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "*Cara pakai:*\n1. Ketik /start\n2. Klik GET AM PREMIUM\n"
-    "3. Kirim email Alight Motion\n4. Buka email, copy magic link\n"
+    "*Cara pakai:*\n"
+    "1. Ketik /start\n"
+    "2. Klik GET AM PREMIUM\n"
+    "3. Kirim email Alight Motion\n"
+    "4. Buka email, copy magic link\n"
     "5. Paste ke bot, tunggu proses\n\n"
-    "*Command:*\n/start — mulai\n/help — panduan\n/status — status bot\n"
-    "/limit — cek sisa limit\n/buy — beli akses no limit\n/mypremium — cek premium\n\n"
-    "*Limit user biasa:* max {max}x per hari\n*Premium:* unlimited, {harga}"
+    "*Command User:*\n"
+    "/start — mulai\n"
+    "/help — panduan\n"
+    "/riwayat — riwayat aktivasi\n"
+    "/limit — cek sisa limit\n"
+    "/buy — beli akses no limit\n"
+    "/mypremium — cek premium\n"
+    "/game — main mini game\n\n"
+    "*Limit user biasa:* max {max}x per hari\n"
+    "*Premium:* unlimited, mulai {harga}"
 )
 
 TXT_STATUS = (
     "📊 *STATUS BOT*\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "Status: ✅ Online\nTotal user: *{users}*\n"
-    "User premium: *{premium}*\nLimit harian: *{max}x*"
+    "Status: ✅ Online\n"
+    "Total user: *{users}*\n"
+    "User premium: *{premium}*\n"
+    "Limit harian: *{max}x*"
 )
 
 TXT_BUY = (
     "💎 *BELI AKSES NO LIMIT*\n"
     "━━━━━━━━━━━━━━━━━━\n"
     "Bebas limit! Aktivasi sepuasnya.\n\n"
-    "💰 *Harga:* {harga}/bulan\n\n"
+    "📦 *Paket tersedia:*\n"
+    "• 1 Bulan — Rp 10.000\n"
+    "• 3 Bulan — Rp 25.000 _(hemat Rp 5.000)_\n"
+    "• Lifetime — Rp 50.000\n\n"
     "📱 *Cara bayar:*\n"
     "1️⃣ Scan QRIS di gambar\n"
     "2️⃣ Atau transfer DANA ke:\n`{dana}`\n\n"
@@ -251,7 +405,8 @@ TXT_BUKTI_DITERIMA = (
 TXT_PREMIUM_AKTIF_NOTIF = (
     "🎉 *PREMIUM KAMU AKTIF!*\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "Status: 👑 ACTIVE\nPaket: Unlimited 30 hari\n\n"
+    "Status: 👑 ACTIVE\n"
+    "Paket: Unlimited\n\n"
     "Sekarang kamu bisa pakai bot tanpa limit!\n"
     "Makasih udah support 🗿🤗"
 )
@@ -267,7 +422,24 @@ TXT_PREMIUM_DITOLAK = (
 TXT_MYPREMIUM = (
     "👑 *STATUS PREMIUM KAMU*\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "Status: {status}\nExpired: *{expired}*\nSisa: *{sisa} hari*\n\n{footer}"
+    "Status: {status}\n"
+    "Expired: *{expired}*\n"
+    "Sisa: *{sisa} hari*\n\n{footer}"
+)
+
+TXT_TESTI_PROMPT = (
+    "📸 *KIRIM TESTIMONI?*\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "Boleh minta testimoni?\n"
+    "Kirim foto screenshot Alight Motion kamu yang udah premium.\n\n"
+    "Kamu dapet *1x limit bonus* 🎁"
+)
+
+TXT_TESTI_DITERIMA = (
+    "✅ *TESTIMONI TERKIRIM!*\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "Makasih udah kirim testimoni 🗿\n"
+    "Kamu dapet *1x limit bonus* 🎁"
 )
 
 
@@ -277,7 +449,8 @@ def kb_reply_bottom():
         [
             [KeyboardButton("🎬 GET PREMIUM"), KeyboardButton("📖 Bantuan")],
             [KeyboardButton("💎 BELI AKSES NO LIMIT"), KeyboardButton("📈 Cek Limit")],
-            [KeyboardButton("👑 My Premium"), KeyboardButton("📊 Status")]
+            [KeyboardButton("👑 My Premium"), KeyboardButton("📊 Status")],
+            [KeyboardButton("🎮 Mini Games"), KeyboardButton("📜 Riwayat")]
         ],
         resize_keyboard=True, is_persistent=True
     )
@@ -289,7 +462,8 @@ def kb_reply_admin():
             [KeyboardButton("📊 Stats"), KeyboardButton("📝 Log")],
             [KeyboardButton("👥 User List"), KeyboardButton("💰 Pending")],
             [KeyboardButton("🎬 GET PREMIUM"), KeyboardButton("💎 BELI AKSES")],
-            [KeyboardButton("👑 My Premium"), KeyboardButton("📖 Bantuan")]
+            [KeyboardButton("👑 My Premium"), KeyboardButton("📖 Bantuan")],
+            [KeyboardButton("🎮 Mini Games"), KeyboardButton("📜 Riwayat")]
         ],
         resize_keyboard=True, is_persistent=True
     )
@@ -298,7 +472,7 @@ def kb_reply_admin():
 def kb_main():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎬 GET AM PREMIUM", callback_data="am_start")],
-        [InlineKeyboardButton("💎 BELI AKSES NO LIMIT — Rp 10.000", callback_data="am_buy")]
+        [InlineKeyboardButton("💎 BELI AKSES NO LIMIT", callback_data="am_buy")]
     ])
 
 
@@ -310,21 +484,48 @@ def kb_limit_habis():
 
 def kb_buy():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📸 Kirim Bukti Transfer", callback_data="am_kirim_bukti")]
+        [InlineKeyboardButton("📸 Kirim Bukti Transfer", callback_data="am_kirim_bukti")],
+        [InlineKeyboardButton("🎫 Punya Kode Voucher?", callback_data="am_voucher")]
     ])
 
 
 def kb_admin_aksi(user_id):
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ Aktifkan", callback_data=f"adm_ok_{user_id}"),
+            InlineKeyboardButton("✅ Aktifkan 30hr", callback_data=f"adm_ok30_{user_id}"),
+            InlineKeyboardButton("✅ Aktifkan 90hr", callback_data=f"adm_ok90_{user_id}")
+        ],
+        [
+            InlineKeyboardButton("✅ Aktifkan Lifetime", callback_data=f"adm_oklife_{user_id}"),
             InlineKeyboardButton("❌ Tolak", callback_data=f"adm_no_{user_id}")
         ]
     ])
 
 
+def kb_back():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 Kembali", callback_data="am_back"),
+         InlineKeyboardButton("❌ Batal", callback_data="am_cancel")]
+    ])
+
+
+def kb_force_join():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCE_JOIN_CHANNEL}")],
+        [InlineKeyboardButton("✅ Udah Join", callback_data="am_check_join")]
+    ])
+
+
+def kb_testi():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📸 Kirim Testimoni", callback_data="am_testi"),
+         InlineKeyboardButton("❌ Skip", callback_data="am_testi_skip")]
+    ])
+
 # ============== HELPER ==============
 def status_limit_text(uid):
+    if is_admin(uid):
+        return "👑 *Admin* — Unlimited!"
     if is_premium_user(uid):
         info = get_premium_info(uid)
         return f"👑 *User PREMIUM*\nUnlimited! Expired: {info['expired']}"
@@ -335,6 +536,18 @@ def status_limit_text(uid):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     uname = update.effective_user.username or update.effective_user.first_name
+
+    # Cek force join
+    if FORCE_JOIN_CHANNEL:
+        joined = await cek_join_channel(context.bot, uid)
+        if not joined:
+            await update.message.reply_text(
+                TXT_FORCE_JOIN,
+                parse_mode="Markdown",
+                reply_markup=kb_force_join()
+            )
+            return
+
     is_new = register_user(uid, uname)
     if is_new and ADMIN_ID:
         try:
@@ -351,27 +564,45 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(TXT_HELP.format(max=LIMIT_PER_DAY, harga=HARGA_PREMIUM), parse_mode="Markdown")
+    await update.message.reply_text(
+        TXT_HELP.format(max=LIMIT_PER_DAY, harga=f"Rp {HARGA_PREMIUM:,}".replace(",", ".")),
+        parse_mode="Markdown"
+    )
 
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = load_log()
     await update.message.reply_text(TXT_STATUS.format(
-        users=len(data["users"]), premium=len(data.get("premium", {})), max=LIMIT_PER_DAY), parse_mode="Markdown")
+        users=len(data["users"]), premium=len(data.get("premium", {})), max=LIMIT_PER_DAY),
+        parse_mode="Markdown")
 
 
 async def limit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     txt = "📊 *LIMIT KAMU*\n━━━━━━━━━━━━━━━━━━\n" + status_limit_text(uid)
-    if is_premium_user(uid):
+    if is_premium_user(uid) or is_admin(uid):
         await update.message.reply_text(txt, parse_mode="Markdown")
     else:
         await update.message.reply_text(txt, parse_mode="Markdown", reply_markup=kb_limit_habis())
 
 
+async def riwayat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    data = load_log()
+    rw = data.get("riwayat", {}).get(str(uid), [])
+    if not rw:
+        await update.message.reply_text("📜 Belum ada riwayat aktivasi.")
+        return
+    txt = "📜 *RIWAYAT AKTIVASI KAMU*\n━━━━━━━━━━━━━━━━━━\n"
+    for i, item in enumerate(reversed(rw[-10:]), 1):
+        tgl = item["time"][:10]
+        txt += f"{i}. `{item['email']}`\n   📅 {tgl}\n"
+    await update.message.reply_text(txt, parse_mode="Markdown")
+
+
 async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_photo(photo=QRIS_URL,
-        caption=TXT_BUY.format(harga=HARGA_PREMIUM, dana=NOMOR_DANA),
+        caption=TXT_BUY.format(dana=NOMOR_DANA),
         parse_mode="Markdown", reply_markup=kb_buy())
 
 
@@ -386,6 +617,7 @@ async def mypremium_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         footer="Unlimited akses aktif!"), parse_mode="Markdown")
 
 
+# ============== ADMIN COMMAND ==============
 async def addprem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ Khusus admin."); return
@@ -409,12 +641,41 @@ async def delprem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Premium `{context.args[0]}` dihapus.", parse_mode="Markdown")
 
 
-# ============== CALLBACK ==============
+async def createvoucher_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Khusus admin."); return
+    if len(context.args) < 3:
+        await update.message.reply_text(
+            "Format: `/createvoucher KODE DISKON MAX_USE`\n"
+            "Contoh: `/createvoucher PROMO50 50 10`",
+            parse_mode="Markdown")
+        return
+    ok, msg = buat_voucher(context.args[0], int(context.args[1]), int(context.args[2]))
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+async def listvoucher_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Khusus admin."); return
+    await update.message.reply_text(list_voucher(), parse_mode="Markdown")
+
+
+async def delvoucher_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Khusus admin."); return
+    if not context.args:
+        await update.message.reply_text("Format: `/delvoucher KODE`", parse_mode="Markdown"); return
+    if hapus_voucher(context.args[0]):
+        await update.message.reply_text(f"✅ Voucher `{context.args[0].upper()}` dihapus.", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("❌ Kode gak ditemukan.", parse_mode="Markdown")
+
+# ============== CALLBACK HANDLER ==============
 async def cb_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     uid = update.effective_user.id
-    if get_limit(uid) <= 0:
+    if get_limit(uid) <= 0 and not is_premium_user(uid):
         await q.message.reply_text(
             TXT_LIMIT_HABIS.format(max=LIMIT_PER_DAY, countdown=get_reset_countdown()),
             parse_mode="Markdown", reply_markup=kb_limit_habis())
@@ -422,14 +683,15 @@ async def cb_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     context.user_data["step"] = "email"
     await q.message.reply_photo(photo=BANNER_URL,
-        caption=TXT_STEP1.format(status_limit=status_limit_text(uid)), parse_mode="Markdown")
+        caption=TXT_STEP1.format(status_limit=status_limit_text(uid)),
+        parse_mode="Markdown", reply_markup=kb_back())
 
 
 async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     await q.message.reply_photo(photo=QRIS_URL,
-        caption=TXT_BUY.format(harga=HARGA_PREMIUM, dana=NOMOR_DANA),
+        caption=TXT_BUY.format(dana=NOMOR_DANA),
         parse_mode="Markdown", reply_markup=kb_buy())
 
 
@@ -440,6 +702,63 @@ async def cb_kirim_bukti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.message.reply_text(TXT_KIRIM_BUKTI, parse_mode="Markdown")
 
 
+async def cb_voucher(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    context.user_data["input_voucher"] = True
+    await q.message.reply_text(
+        "🎫 *MASUKIN KODE VOUCHER*\n━━━━━━━━━━━━━━━━━━\nKetik kode voucher kamu:",
+        parse_mode="Markdown")
+
+
+async def cb_testi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    context.user_data["kirim_testi"] = True
+    await q.message.reply_text("📸 Kirim foto screenshotnya sekarang:")
+
+
+async def cb_testi_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    await q.message.reply_text("Oke, gapapa. Makasih udah pakai bot 🗿")
+    context.user_data.pop("kirim_testi", None)
+
+
+async def cb_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    context.user_data.clear()
+    await q.message.reply_photo(photo=BANNER_URL, caption=TXT_WELCOME,
+        parse_mode="Markdown", reply_markup=kb_main())
+
+
+async def cb_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    context.user_data.clear()
+    await q.message.reply_text("❌ Dibatalkan. Ketik /start buat mulai lagi.")
+
+
+async def cb_check_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = update.effective_user.id
+    joined = await cek_join_channel(context.bot, uid)
+    if not joined:
+        await q.answer("❌ Kamu belum join channel!", show_alert=True)
+        return
+    uname = update.effective_user.username or update.effective_user.first_name
+    register_user(uid, uname)
+    add_log(uid, uname, "start")
+    await q.message.reply_photo(photo=BANNER_URL, caption=TXT_WELCOME,
+        parse_mode="Markdown", reply_markup=kb_main())
+    if is_admin(uid):
+        await q.message.reply_text("👑 Menu admin:", reply_markup=kb_reply_admin())
+    else:
+        await q.message.reply_text("👇 Menu cepat:", reply_markup=kb_reply_bottom())
+
+
 async def cb_admin_aksi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -448,22 +767,15 @@ async def cb_admin_aksi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     aksi = parts[1]
     target = int(parts[2])
 
-    if aksi == "ok":
+    if aksi == "ok30":
         set_premium_user(target, 30)
-        add_log(target, "user", "premium_manual_aktif")
-        data = load_log()
-        data.get("pending", {}).pop(str(target), None)
-        save_log(data)
-        try:
-            await q.edit_message_caption(
-                caption=q.message.caption + "\n\n✅ *SUDAH DIAKTIFKAN*",
-                parse_mode="Markdown")
-        except:
-            await q.edit_message_text("✅ Sudah diaktifkan.")
-        try:
-            await context.bot.send_message(target, TXT_PREMIUM_AKTIF_NOTIF, parse_mode="Markdown")
-        except: pass
-
+        days_txt = "30 hari"
+    elif aksi == "ok90":
+        set_premium_user(target, 90)
+        days_txt = "90 hari"
+    elif aksi == "oklife":
+        set_premium_user(target, 36500)
+        days_txt = "Lifetime"
     elif aksi == "no":
         context.user_data["reject_target"] = target
         try:
@@ -472,6 +784,25 @@ async def cb_admin_aksi(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown")
         except:
             await q.edit_message_text("❌ Ditolak. Ketik alasan:")
+        return
+    else:
+        return
+
+    add_log(target, "user", f"premium_manual_{aksi}")
+    data = load_log()
+    data.get("pending", {}).pop(str(target), None)
+    save_log(data)
+    try:
+        await q.edit_message_caption(
+            caption=q.message.caption + f"\n\n✅ *DIAKTIFKAN ({days_txt})*",
+            parse_mode="Markdown")
+    except:
+        await q.edit_message_text(f"✅ Diaktifkan ({days_txt}).")
+    try:
+        await context.bot.send_message(target,
+            f"🎉 *PREMIUM KAMU AKTIF!*\nPaket: {days_txt}\n\nSelamat 🗿🤗",
+            parse_mode="Markdown")
+    except: pass
 
 
 # ============== ROUTER ==============
@@ -479,17 +810,50 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     uname = update.effective_user.username or update.effective_user.first_name
 
+    # ===== Handle foto =====
     if update.message.photo:
+        photo = update.message.photo[-1]
+
+        # Foto testimoni
+        if context.user_data.get("kirim_testi"):
+            caption_channel = (
+                f"📸 *TESTIMONI BARU*\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"👤 Nama: {update.effective_user.first_name}\n"
+                f"📛 Username: @{uname}\n"
+                f"📅 Tanggal: {datetime.now().strftime('%d %B %Y')}\n"
+                f"✅ Verified by @Kelvanra_bot"
+            )
+            try:
+                if TESTIMONI_CHANNEL:
+                    await context.bot.send_photo(
+                        f"@{TESTIMONI_CHANNEL}",
+                        photo=photo.file_id,
+                        caption=caption_channel,
+                        parse_mode="Markdown")
+                    tambah_limit_bonus(uid, 1)
+                    add_log(uid, uname, "kirim_testimoni")
+                    await update.message.reply_text(TXT_TESTI_DITERIMA, parse_mode="Markdown")
+                else:
+                    await update.message.reply_text("❌ Channel testimoni belum di-set.")
+            except Exception as e:
+                await update.message.reply_text(f"❌ Gagal kirim: {e}")
+            context.user_data.pop("kirim_testi", None)
+            return
+
+        # Foto bukti transfer
         if context.user_data.get("kirim_bukti"):
-            photo = update.message.photo[-1]
+            nominal = context.user_data.get("harga_final", HARGA_PREMIUM)
+            voucher_used = context.user_data.get("voucher_aktif", "-")
             caption_admin = (
                 f"💰 *PEMBELIAN PREMIUM BARU*\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"👤 Nama: {update.effective_user.first_name}\n"
                 f"📛 Username: @{uname}\n"
                 f"🆔 User ID: `{uid}`\n"
-                f"💵 Nominal: {HARGA_PREMIUM}\n\n"
-                f"Cek bukti transfer di bawah 👇"
+                f"💵 Nominal: Rp {nominal:,}\n"
+                f"🎫 Voucher: {voucher_used}\n\n"
+                f"Cek bukti transfer di bawah 👇".replace(",", ".")
             )
             try:
                 await context.bot.send_photo(
@@ -513,17 +877,36 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text.strip() if update.message.text else ""
 
+    # ===== Admin reply alasan tolak =====
     if is_admin(uid) and context.user_data.get("reject_target") and text:
         target = context.user_data.pop("reject_target")
         try:
-            await context.bot.send_message(
-                target,
+            await context.bot.send_message(target,
                 TXT_PREMIUM_DITOLAK.format(reason=text, admin=ADMIN_USERNAME),
                 parse_mode="Markdown")
         except: pass
-        await update.message.reply_text(f"✅ Alasan penolakan dikirim ke `{target}`.", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ Alasan dikirim ke `{target}`.", parse_mode="Markdown")
         return
 
+    # ===== Input voucher =====
+    if context.user_data.get("input_voucher"):
+        kode = text.upper().strip()
+        valid, diskon, pesan = cek_voucher(kode)
+        if not valid:
+            await update.message.reply_text(pesan)
+            context.user_data.pop("input_voucher", None)
+            return
+        harga_diskon = int(HARGA_PREMIUM * (100 - diskon) / 100)
+        context.user_data["voucher_aktif"] = kode
+        context.user_data["harga_final"] = harga_diskon
+        context.user_data.pop("input_voucher", None)
+        await update.message.reply_text(
+            f"{pesan}\n\n💰 Harga asli: *Rp 10.000*\n🎉 Harga diskon: *Rp {harga_diskon:,}*\n\n"
+            f"Transfer sesuai nominal diskon, kirim bukti ke bot.".replace(",", "."),
+            parse_mode="Markdown")
+        return
+
+    # ===== TOMBOL ADMIN =====
     if text == "📊 Stats" and is_admin(uid):
         data = load_log()
         logs = data["logs"]
@@ -539,16 +922,14 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Sukses: *{sukses}*\n"
             f"❌ Gagal: *{gagal}*\n"
             f"⏳ Pending: *{len(data.get('pending', {}))}*",
-            parse_mode="Markdown"
-        )
+            parse_mode="Markdown")
         return
 
     if text == "📝 Log" and is_admin(uid):
         data = load_log()
         logs = data["logs"][-20:]
         if not logs:
-            await update.message.reply_text("Belum ada log.")
-            return
+            await update.message.reply_text("Belum ada log."); return
         txt = "📝 *20 LOG TERAKHIR*\n━━━━━━━━━━━━━━━━━━\n"
         for l in logs:
             txt += f"`{l['time'][11:19]}` @{l['username']} — {l['event']}\n"
@@ -559,8 +940,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = load_log()
         users = list(data["users"].items())[-30:]
         if not users:
-            await update.message.reply_text("Belum ada user.")
-            return
+            await update.message.reply_text("Belum ada user."); return
         txt = "👥 *30 USER TERAKHIR*\n━━━━━━━━━━━━━━━━━━\n"
         for user_id, info in users:
             prem = "👑" if is_premium_user(int(user_id)) else "👤"
@@ -572,34 +952,35 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = load_log()
         pending = data.get("pending", {})
         if not pending:
-            await update.message.reply_text("✅ Gak ada pending pembayaran.")
-            return
+            await update.message.reply_text("✅ Gak ada pending."); return
         txt = "💰 *PENDING PEMBAYARAN*\n━━━━━━━━━━━━━━━━━━\n"
         for user_id, info in pending.items():
             txt += f"🆔 `{user_id}` — @{info['username']}\n"
-        txt += "\n_Ketik /addprem <id> buat aktifin_"
         await update.message.reply_text(txt, parse_mode="Markdown")
         return
 
+    # ===== TOMBOL USER =====
     if text == "🎬 GET PREMIUM":
         context.user_data.clear()
         context.user_data["step"] = "email"
-        if get_limit(uid) <= 0:
+        if get_limit(uid) <= 0 and not is_premium_user(uid):
             await update.message.reply_text(
                 TXT_LIMIT_HABIS.format(max=LIMIT_PER_DAY, countdown=get_reset_countdown()),
                 parse_mode="Markdown", reply_markup=kb_limit_habis())
             return
         await update.message.reply_photo(photo=BANNER_URL,
-            caption=TXT_STEP1.format(status_limit=status_limit_text(uid)), parse_mode="Markdown")
+            caption=TXT_STEP1.format(status_limit=status_limit_text(uid)),
+            parse_mode="Markdown", reply_markup=kb_back())
         return
 
     if text == "📖 Bantuan":
-        await update.message.reply_text(TXT_HELP.format(max=LIMIT_PER_DAY, harga=HARGA_PREMIUM), parse_mode="Markdown")
+        await update.message.reply_text(
+            TXT_HELP.format(max=LIMIT_PER_DAY, harga=f"Rp {HARGA_PREMIUM:,}".replace(",", ".")),
+            parse_mode="Markdown")
         return
 
     if text in ["💎 BELI AKSES NO LIMIT", "💎 BELI AKSES"]:
-        await update.message.reply_photo(photo=QRIS_URL,
-            caption=TXT_BUY.format(harga=HARGA_PREMIUM, dana=NOMOR_DANA),
+        await update.message.reply_photo(photo=QRIS_URL, caption=TXT_BUY.format(dana=NOMOR_DANA),
             parse_mode="Markdown", reply_markup=kb_buy())
         return
 
@@ -616,14 +997,25 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "📊 Status":
         data = load_log()
         await update.message.reply_text(TXT_STATUS.format(
-            users=len(data["users"]), premium=len(data.get("premium", {})), max=LIMIT_PER_DAY), parse_mode="Markdown")
+            users=len(data["users"]), premium=len(data.get("premium", {})),
+            max=LIMIT_PER_DAY), parse_mode="Markdown")
         return
 
     if text == "📈 Cek Limit":
         await update.message.reply_text(
-            "📊 *LIMIT KAMU*\n━━━━━━━━━━━━━━━━━━\n" + status_limit_text(uid), parse_mode="Markdown")
+            "📊 *LIMIT KAMU*\n━━━━━━━━━━━━━━━━━━\n" + status_limit_text(uid),
+            parse_mode="Markdown")
         return
 
+    if text == "📜 Riwayat":
+        await riwayat_cmd(update, context)
+        return
+
+    if text == "🎮 Mini Games":
+        await mini_game(update, context)
+        return
+
+    # ===== FLOW AKTIVASI =====
     step = context.user_data.get("step")
 
     if step == "email":
@@ -642,7 +1034,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data.clear(); return
             await msg.delete()
             await update.message.reply_photo(photo=BANNER_URL,
-                caption=TXT_STEP2.format(email=email), parse_mode="Markdown")
+                caption=TXT_STEP2.format(email=email), parse_mode="Markdown",
+                reply_markup=kb_back())
         except Exception as e:
             await msg.edit_text(f"❌ Error: `{e}`", parse_mode="Markdown")
 
@@ -666,10 +1059,13 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data.clear(); return
             use_limit(uid)
             add_log(uid, uname, "premium_sukses")
+            add_riwayat(uid, email)
             await msg.delete()
             caption = TXT_SUCCESS_PREMIUM_USER.format(email=email) if is_premium_user(uid) \
                 else TXT_SUCCESS.format(email=email, status_limit=status_limit_text(uid))
             await update.message.reply_photo(photo=BANNER_URL, caption=caption, parse_mode="Markdown")
+            # Prompt testimoni
+            await update.message.reply_text(TXT_TESTI_PROMPT, parse_mode="Markdown", reply_markup=kb_testi())
             if ADMIN_ID:
                 try:
                     await context.bot.send_message(ADMIN_ID,
@@ -682,6 +1078,99 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     else:
         await update.message.reply_text("Ketik /start buat mulai.")
+
+# ============== MINI GAMES ==============
+SOAL_GAME = [
+    {"q": "Ibu kota Indonesia?", "a": ["jakarta", "dki jakarta"]},
+    {"q": "2 + 2 x 2 = ?", "a": ["6"]},
+    {"q": "Planet terdekat matahari?", "a": ["merkurius", "mercury"]},
+    {"q": "Hewan tercepat di darat?", "a": ["cheetah", "citah"]},
+    {"q": "Warna langit cerah?", "a": ["biru", "blue"]},
+    {"q": "Berapa jumlah warna pelangi?", "a": ["7", "tujuh"]},
+    {"q": "Ibu kota Jepang?", "a": ["tokyo"]},
+    {"q": "Alight Motion itu aplikasi apa?", "a": ["editor video", "edit video", "video editing"]},
+    {"q": "1 tahun = berapa hari (biasa)?", "a": ["365"]},
+    {"q": "Presiden pertama Indonesia?", "a": ["soekarno", "sukarno"]},
+]
+
+
+async def mini_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if context.user_data.get("game_aktif"):
+        await update.message.reply_text("⚠️ Selesaikan game sebelumnya dulu.")
+        return
+    soal = random.choice(SOAL_GAME)
+    context.user_data["game_aktif"] = True
+    context.user_data["game_jawaban"] = soal["a"]
+    await update.message.reply_text(
+        f"🎮 *MINI GAMES*\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"❓ {soal['q']}\n\n"
+        f"💡 Jawab di chat ini.\n"
+        f"🎁 Menang dapet *1x limit bonus*!\n"
+        f"❌ Kalo salah, gak dapet apa-apa.\n\n"
+        f"Ketik jawaban:",
+        parse_mode="Markdown"
+    )
+
+
+async def cek_jawaban_game(update: Update, context: ContextTypes.DEFAULT_TYPE, jawaban: str):
+    """Dipanggil dari router kalo ada game aktif"""
+    uid = update.effective_user.id
+    uname = update.effective_user.username or update.effective_user.first_name
+    benar = context.user_data.get("game_jawaban", [])
+    context.user_data.pop("game_aktif", None)
+    context.user_data.pop("game_jawaban", None)
+
+    jawaban_lower = jawaban.lower().strip()
+    if jawaban_lower in [x.lower() for x in benar]:
+        tambah_limit_bonus(uid, 1)
+        add_log(uid, uname, "menang_game")
+        await update.message.reply_text(
+            "🎉 *BENAR!*\n\n"
+            "Kamu dapet *1x limit bonus* 🎁\n"
+            "Ketik /limit buat cek sisa limit.",
+            parse_mode="Markdown"
+        )
+    else:
+        jawaban_benar = benar[0] if benar else "-"
+        await update.message.reply_text(
+            f"❌ *SALAH!*\n\n"
+            f"Jawaban bener: *{jawaban_benar.capitalize()}*\n"
+            f"Coba lagi kapan aja 🗿",
+            parse_mode="Markdown"
+        )
+    return True
+
+
+# ============== BACKUP SCHEDULER ==============
+async def daily_stats_loop(bot, admin_id):
+    """Kirim stats ke admin tiap jam 12 malam"""
+    while True:
+        now = datetime.now()
+        besok = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        delta = (besok - now).total_seconds()
+        await asyncio.sleep(delta)
+        try:
+            data = load_log()
+            today = str(date.today())
+            today_users = sum(1 for u in data["users"].values() if u["first_seen"].startswith(today))
+            total_prem = len(data.get("premium", {}))
+            logs_today = [l for l in data["logs"] if l["time"].startswith(today)]
+            sukses_today = sum(1 for l in logs_today if l["event"] == "premium_sukses")
+            txt = (
+                f"📊 *STATISTIK HARIAN*\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📅 Tanggal: {today}\n"
+                f"👥 User baru: *{today_users}*\n"
+                f"✅ Sukses premium: *{sukses_today}*\n"
+                f"👑 Total premium aktif: *{total_prem}*\n"
+                f"⏳ Pending pembayaran: *{len(data.get('pending', {}))}*\n\n"
+                f"_Selamat pagi admin! 🌅_"
+            )
+            await bot.send_message(admin_id, txt, parse_mode="Markdown")
+        except Exception as e:
+            print(f"[DAILY STATS ERROR] {e}")
 
 
 # ============== WEB ==============
@@ -698,23 +1187,59 @@ def run_web():
 
 
 # ============== MAIN ==============
+async def post_init(app):
+    """Jalanin scheduler pas bot start"""
+    if ADMIN_ID:
+        asyncio.create_task(daily_stats_loop(app.bot, ADMIN_ID))
+        print("✅ Daily stats scheduler jalan")
+
+
 def main():
     threading.Thread(target=run_web, daemon=True).start()
-    app = Application.builder().token(TOKEN).build()
+
+    app = Application.builder().token(TOKEN).post_init(post_init).build()
+
+    # Command handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("limit", limit_cmd))
+    app.add_handler(CommandHandler("riwayat", riwayat_cmd))
     app.add_handler(CommandHandler("buy", buy_cmd))
     app.add_handler(CommandHandler("mypremium", mypremium_cmd))
+    app.add_handler(CommandHandler("game", mini_game))
+
+    # Admin commands
     app.add_handler(CommandHandler("addprem", addprem_cmd))
     app.add_handler(CommandHandler("delprem", delprem_cmd))
+    app.add_handler(CommandHandler("createvoucher", createvoucher_cmd))
+    app.add_handler(CommandHandler("listvoucher", listvoucher_cmd))
+    app.add_handler(CommandHandler("delvoucher", delvoucher_cmd))
+
+    # Callback handlers
     app.add_handler(CallbackQueryHandler(cb_start, pattern="^am_start$"))
     app.add_handler(CallbackQueryHandler(cb_buy, pattern="^am_buy$"))
     app.add_handler(CallbackQueryHandler(cb_kirim_bukti, pattern="^am_kirim_bukti$"))
-    app.add_handler(CallbackQueryHandler(cb_admin_aksi, pattern="^adm_(ok|no)_"))
+    app.add_handler(CallbackQueryHandler(cb_voucher, pattern="^am_voucher$"))
+    app.add_handler(CallbackQueryHandler(cb_testi, pattern="^am_testi$"))
+    app.add_handler(CallbackQueryHandler(cb_testi_skip, pattern="^am_testi_skip$"))
+    app.add_handler(CallbackQueryHandler(cb_back, pattern="^am_back$"))
+    app.add_handler(CallbackQueryHandler(cb_cancel, pattern="^am_cancel$"))
+    app.add_handler(CallbackQueryHandler(cb_check_join, pattern="^am_check_join$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_aksi, pattern="^adm_(ok30|ok90|oklife|no)_"))
+
+    # Message handlers
     app.add_handler(MessageHandler(filters.PHOTO, router))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, router))
+
+    async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        # Cek game aktif dulu
+        if context.user_data.get("game_aktif"):
+            await cek_jawaban_game(update, context, update.message.text.strip())
+            return
+        await router(update, context)
+
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
+
     print("✅ Bot jalan!")
     app.run_polling()
 
