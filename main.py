@@ -817,7 +817,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Foto testimoni
         if context.user_data.get("kirim_testi"):
             caption_channel = (
-                f"📸 *TESTIMONI BARU*\n"
+                f"📸 TESTIMONI BARU\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"👤 Nama: {update.effective_user.first_name}\n"
                 f"📛 Username: @{uname}\n"
@@ -830,7 +830,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"@{TESTIMONI_CHANNEL}",
                         photo=photo.file_id,
                         caption=caption_channel,
-                        parse_mode="Markdown")
+                        parse_mode=none)
                     tambah_limit_bonus(uid, 1)
                     add_log(uid, uname, "kirim_testimoni")
                     await update.message.reply_text(TXT_TESTI_DITERIMA, parse_mode="Markdown")
