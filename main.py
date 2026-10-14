@@ -830,7 +830,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"@{TESTIMONI_CHANNEL}",
                         photo=photo.file_id,
                         caption=caption_channel,
-                        parse_mode=none)
+                        parse_mode=None)
                     tambah_limit_bonus(uid, 1)
                     add_log(uid, uname, "kirim_testimoni")
                     await update.message.reply_text(TXT_TESTI_DITERIMA, parse_mode="Markdown")
